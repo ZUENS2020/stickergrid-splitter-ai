@@ -1,16 +1,88 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import JSZip from 'jszip';
 import DropZone from './components/DropZone';
 import GridPreview from './components/GridPreview';
 import { sliceImage } from './services/imageProcessing';
 import { generateStickerLabels } from './services/geminiService';
 import { StickerSegment, ProcessingStatus } from './types';
-import { Sparkles, Grid3X3, Layers } from 'lucide-react';
+import { Sparkles, Grid3X3, Layers, Key, ChevronRight, Lock } from 'lucide-react';
 
 const App: React.FC = () => {
   const [segments, setSegments] = useState<StickerSegment[]>([]);
   const [status, setStatus] = useState<ProcessingStatus>('idle');
   const [error, setError] = useState<string | null>(null);
+  
+  // API Key State
+  const [hasApiKey, setHasApiKey] = useState<boolean>(false);
+  const [isCheckingKey, setIsCheckingKey] = useState<boolean>(true);
+  const [customApiKey, setCustomApiKey] = useState<string>('');
+  const [manualKeyInput, setManualKeyInput] = useState<string>('');
+
+  useEffect(() => {
+    const checkKey = async () => {
+      try {
+        // 1. Check Local Storage
+        const storedKey = localStorage.getItem('gemini_api_key');
+        if (storedKey) {
+            setCustomApiKey(storedKey);
+            setHasApiKey(true);
+            setIsCheckingKey(false);
+            return;
+        }
+
+        // 2. Check Platform Integration
+        if (window.aistudio && window.aistudio.hasSelectedApiKey) {
+           const hasKey = await window.aistudio.hasSelectedApiKey();
+           if (hasKey) {
+               setHasApiKey(true);
+               setIsCheckingKey(false);
+               return;
+           }
+        } 
+        
+        // 3. Check Environment Variable
+        if (process.env.API_KEY) {
+            setHasApiKey(true);
+        }
+
+      } catch (e) {
+        console.error("Error checking API key:", e);
+      } finally {
+        setIsCheckingKey(false);
+      }
+    };
+    checkKey();
+  }, []);
+
+  const handleSelectKey = async () => {
+      if (window.aistudio) {
+          try {
+            await window.aistudio.openSelectKey();
+            setHasApiKey(true);
+          } catch(e) {
+              console.error(e);
+          }
+      }
+  };
+
+  const handleManualKeySubmit = (e: React.FormEvent) => {
+      e.preventDefault();
+      if (manualKeyInput.trim().length > 0) {
+          const key = manualKeyInput.trim();
+          localStorage.setItem('gemini_api_key', key);
+          setCustomApiKey(key);
+          setHasApiKey(true);
+      }
+  };
+
+  const clearApiKey = () => {
+      localStorage.removeItem('gemini_api_key');
+      setCustomApiKey('');
+      setHasApiKey(false);
+      setManualKeyInput('');
+      setStatus('idle');
+      setError(null);
+  };
 
   const handleFileSelect = useCallback(async (file: File) => {
     setStatus('slicing');
@@ -25,9 +97,7 @@ const App: React.FC = () => {
       setStatus('analyzing');
 
       // 2. AI Analysis
-      // We process AI in parallel with displaying the initial grid
-      // so the user sees the images immediately while labels load.
-      generateStickerLabels(file)
+      generateStickerLabels(file, customApiKey)
         .then((labels) => {
           setSegments(prev => prev.map((seg, idx) => ({
             ...seg,
@@ -38,7 +108,17 @@ const App: React.FC = () => {
         })
         .catch(err => {
           console.error("AI Analysis failed", err);
-          // Don't block usage, just keep default labels
+          
+          const errorMessage = err?.message || "";
+          // Handle Auth Errors
+          if (errorMessage.includes("Requested entity was not found") || errorMessage.includes("403") || errorMessage.includes("API Key is missing")) {
+             clearApiKey(); // Reset key state
+             setError("API Key invalid or expired. Please enter a valid key.");
+             setStatus('error'); 
+             return;
+          }
+
+          // Non-fatal error: just keep default labels
           setStatus('complete');
           setSegments(prev => prev.map(s => ({ ...s, isProcessing: false })));
         });
@@ -48,7 +128,7 @@ const App: React.FC = () => {
       setError(err.message || 'An error occurred while processing the image.');
       setStatus('error');
     }
-  }, []);
+  }, [customApiKey]);
 
   const handleUpdateLabel = (id: number, newLabel: string) => {
     setSegments(prev => prev.map(seg => 
@@ -61,9 +141,7 @@ const App: React.FC = () => {
 
     const zip = new JSZip();
     
-    // Create a folder (optional, usually zip root is fine, let's keep it clean)
     segments.forEach((seg) => {
-        // Ensure valid filename
         const safeLabel = seg.label.replace(/[^a-z0-9-_]/gi, '_').toLowerCase();
         zip.file(`${safeLabel}.png`, seg.blob);
     });
@@ -89,6 +167,95 @@ const App: React.FC = () => {
     setError(null);
   };
 
+  // ----------------------------------------------------------------
+  // Render: Loading
+  // ----------------------------------------------------------------
+
+  if (isCheckingKey) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50">
+        <div className="animate-spin w-8 h-8 border-4 border-indigo-600 border-t-transparent rounded-full"></div>
+      </div>
+    );
+  }
+
+  // ----------------------------------------------------------------
+  // Render: Key Selection Screen
+  // ----------------------------------------------------------------
+
+  if (!hasApiKey) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex flex-col justify-center items-center p-4">
+          <div className="max-w-md w-full bg-white rounded-2xl shadow-xl p-8 text-center border border-slate-100 animate-in fade-in zoom-in duration-300">
+              <div className="w-16 h-16 bg-indigo-100 text-indigo-600 rounded-full flex items-center justify-center mx-auto mb-6">
+                  <Key className="w-8 h-8" />
+              </div>
+              <h2 className="text-2xl font-bold text-slate-900 mb-3">Configure Gemini API</h2>
+              <p className="text-slate-600 mb-8 leading-relaxed">
+                  To use the AI auto-tagging feature, please connect your Google Gemini API key.
+              </p>
+              
+              {/* Option 1: Platform Select (if available) */}
+              {window.aistudio && (
+                <>
+                  <button 
+                    onClick={handleSelectKey}
+                    className="w-full py-3 px-4 bg-indigo-600 hover:bg-indigo-700 text-white font-medium rounded-xl transition-all shadow-md hover:shadow-lg flex items-center justify-center gap-2 transform active:scale-95 mb-4"
+                  >
+                      <Sparkles className="w-5 h-5" />
+                      <span className="text-lg">Select API Key</span>
+                  </button>
+                  
+                  <div className="relative my-6">
+                    <div className="absolute inset-0 flex items-center">
+                      <div className="w-full border-t border-slate-200"></div>
+                    </div>
+                    <div className="relative flex justify-center text-sm">
+                      <span className="px-2 bg-white text-slate-500 font-medium">OR</span>
+                    </div>
+                  </div>
+                </>
+              )}
+
+              {/* Option 2: Manual Entry */}
+              <form onSubmit={handleManualKeySubmit} className="text-left">
+                  <label htmlFor="apiKey" className="block text-sm font-medium text-slate-700 mb-1 ml-1">
+                      Enter API Key Manually
+                  </label>
+                  <div className="relative flex items-center">
+                    <input
+                        type="password"
+                        id="apiKey"
+                        value={manualKeyInput}
+                        onChange={(e) => setManualKeyInput(e.target.value)}
+                        placeholder="AIzaSy..."
+                        className="w-full pl-10 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:bg-white transition-all outline-none text-slate-800"
+                    />
+                    <Lock className="w-4 h-4 text-slate-400 absolute left-3" />
+                    <button 
+                        type="submit"
+                        disabled={!manualKeyInput}
+                        className="absolute right-1.5 top-1.5 bottom-1.5 px-3 bg-white text-indigo-600 hover:bg-indigo-50 rounded-lg text-sm font-semibold disabled:opacity-50 disabled:cursor-not-allowed transition-colors border border-slate-200"
+                    >
+                        Save
+                    </button>
+                  </div>
+              </form>
+
+              <p className="mt-6 text-xs text-slate-400">
+                  <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" className="text-indigo-500 hover:underline flex items-center justify-center gap-1">
+                      Get an API Key <ChevronRight className="w-3 h-3" />
+                  </a>
+              </p>
+          </div>
+      </div>
+    );
+  }
+
+  // ----------------------------------------------------------------
+  // Render: Main App
+  // ----------------------------------------------------------------
+
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 pb-20">
       {/* Header */}
@@ -103,13 +270,16 @@ const App: React.FC = () => {
             </h1>
           </div>
           <div className="flex items-center gap-4 text-sm font-medium text-slate-500">
-             <span className="flex items-center gap-1.5">
-                <Layers className="w-4 h-4" /> 4x4 Split
-             </span>
-             <span className="w-px h-4 bg-slate-300 mx-1 hidden sm:block"></span>
-             <span className="flex items-center gap-1.5 hidden sm:flex">
-                <Sparkles className="w-4 h-4 text-indigo-500" /> Auto-Tagging
-             </span>
+             {/* Key Status Indicator */}
+             <div className="hidden sm:flex items-center gap-2 bg-slate-100 px-3 py-1 rounded-full border border-slate-200">
+                <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
+                <span className="text-xs text-slate-600">API Connected</span>
+                {customApiKey && (
+                    <button onClick={clearApiKey} className="ml-1 p-0.5 hover:bg-slate-200 rounded-full text-slate-400 hover:text-red-500 transition-colors" title="Change Key">
+                         <Key className="w-3 h-3" />
+                    </button>
+                )}
+             </div>
           </div>
         </div>
       </header>
@@ -148,12 +318,21 @@ const App: React.FC = () => {
                 <FileWarning className="w-10 h-10 text-red-500 mx-auto mb-3" />
                 <h3 className="text-lg font-semibold text-red-700">Something went wrong</h3>
                 <p className="text-red-600 mt-1 mb-6">{error}</p>
-                <button 
-                    onClick={handleReset}
-                    className="px-4 py-2 bg-white border border-red-200 text-red-600 font-medium rounded-lg hover:bg-red-50 transition-colors"
-                >
-                    Try Again
-                </button>
+                <div className="flex justify-center gap-3">
+                    <button 
+                        onClick={handleReset}
+                        className="px-4 py-2 bg-white border border-red-200 text-red-600 font-medium rounded-lg hover:bg-red-50 transition-colors"
+                    >
+                        Try Again
+                    </button>
+                     {/* Option to change key if error occurred */}
+                    <button 
+                        onClick={clearApiKey}
+                        className="px-4 py-2 bg-red-100 text-red-700 font-medium rounded-lg hover:bg-red-200 transition-colors"
+                    >
+                        Change API Key
+                    </button>
+                </div>
             </div>
         )}
 

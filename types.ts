@@ -12,3 +12,10 @@ export interface GridDimensions {
 }
 
 export type ProcessingStatus = 'idle' | 'slicing' | 'analyzing' | 'complete' | 'error';
+
+declare global {
+  interface AIStudio {
+    hasSelectedApiKey: () => Promise<boolean>;
+    openSelectKey: () => Promise<void>;
+  }
+}
